@@ -264,81 +264,120 @@ Looker Studio dashboards typically connect to data sources containing informatio
 
 ```
 ┌──────────────────┐
-│  Operational     │  ← Main data source
-│  Data Source     │     (e.g., service records, incident reports)
-│  (Google Sheets, │     Contains: Region, Site, Department, Date, Metrics
+│  Operational     │  ← Main data source (NO email field needed)
+│  Data Source     │     Contains: Region, Site, Department, Date, Metrics
+│  (Google Sheets, │     Example: Service records, incident reports
 │   BigQuery, etc.)│
 └────────┬─────────┘
          │
-         │  Data Blending
+         │  Left Join (Data Blending)
+         │  Join Keys: Region + Site + Department
+         │
          ▼
 ┌──────────────────┐
-│  ACL Expanded    │  ← Permission data source
+│  ACL Expanded    │  ← Access Control List (ACL)
 │     Sheet        │     Contains: Email, Region, Site, Department
+│  [Email Filter   │     **Email filter applied at data source level**
+│   Applied Here]  │     Only current viewer's rows loaded
 └────────┬─────────┘
          │
-         │  Inner Join on: Region + Site + Department
+         │  Blend filters operational data
+         │  based on viewer's permissions
+         │
          ▼
 ┌──────────────────┐
 │   Blended Data   │  ← Filtered dataset
-│     Source       │     Only includes rows user has permission to see
+│     Source       │     Contains only data viewer has permission to see
 └────────┬─────────┘
          │
-         │  Filter by: Email = VIEWER_EMAIL()
+         │  Automatic filtering by logged-in user
+         │  No additional report filters needed
+         │
          ▼
 ┌──────────────────┐
 │  Looker Studio   │  ← Dashboard
-│    Dashboard     │     User sees only their permitted data
+│    Dashboard     │     Each user sees only their permitted data
 └──────────────────┘
 ```
+
+**Key Difference from Simple Approach:**
+- Email filter is applied at the **data source level**, not in the report
+- Operational data doesn't need email addresses
+- Blending creates the many-to-many relationship (multiple users can see same data)
+- More efficient: Only relevant ACL records are loaded per user
 
 ### Step-by-Step Looker Studio Setup
 
 #### Step 1: Connect Data Sources
 
-1. **Add Main Data Source**
+1. **Add Main Data Source (Your Operational Data)**
    - Connect to your operational data (Google Sheets, BigQuery, etc.)
    - Ensure it contains: Region, Local Site, Department/Function fields
    - Example fields: Date, Service Type, Incident Count, Staff Hours, etc.
+   - **Important**: This table does NOT need email addresses
 
 2. **Add ACL Expanded Data Source**
    - Connect to the "ACL Expanded" sheet
    - Fields available: Email, Full Name, Region, Local Site, Department/Function, Access Level, Source Filter
+   - This serves as your Access Control List (ACL)
 
-#### Step 2: Create Data Blend
+#### Step 2: Apply Email Filter to ACL Data Source
 
-**Blending is CRITICAL** - this is where permission filtering happens.
+**This is the critical security step** - Apply the email filter BEFORE blending:
+
+1. **Edit the ACL Expanded data source** (not in the report, but in the data source settings)
+2. Click **"Add a filter"** 
+3. Select **"Filter by email"** or create custom filter
+4. Configure filter:
+   - Field: `Email`
+   - Operator: `Equals`
+   - Value: Check **"Filter by email"** option
+   
+**Alternative method:**
+1. In data source settings, find **"Access Control"** section
+2. Enable **"Email owner's credential to access data"**
+3. Set filter field to `Email`
+
+**What this does:**
+- When any user views the report, Looker Studio automatically filters the ACL data source
+- Only rows where `Email` matches the viewer's logged-in email are loaded
+- This happens BEFORE data blending, making it more efficient and secure
+
+#### Step 3: Create Data Blend
+
+**Blending creates the many-to-many relationship between users and data.**
 
 1. In Looker Studio, create a new Data Blend
-2. **Left Table**: Your main operational data source
-3. **Right Table**: ACL Expanded sheet
+2. **Left Table (Data Table)**: Your main operational data source
+   - This is the data you want to show
+3. **Right Table (ACL Table)**: ACL Expanded sheet (with email filter applied)
+   - This controls who can see what
 4. **Join Configuration**:
-   - Join Type: **Inner Join** (only returns records where both sides match)
-   - Join Keys:
+   - Join Type: **Left Join** (we want all data from main source, filtered by ACL)
+   - Join Keys (these are your common fields):
      ```
      Main Data.Region = ACL Expanded.Region
      Main Data.Local Site = ACL Expanded.Local Site
      Main Data.Department = ACL Expanded.Department/Function
      ```
 
-**Why Inner Join?**
-- Inner join ensures users only see data they have explicit permission for
-- If there's no matching record in ACL Expanded, the data is excluded
-- This is the enforcement mechanism for access control
+**Why Left Join (not Inner Join)?**
+- We start from the data table (left side)
+- The ACL table is already filtered to current user's permissions
+- Left join effectively "adds" the user's email as a column to their permitted data
+- Since ACL is pre-filtered by email, only matching records join
+- Result: User sees only data they have permission for
 
-#### Step 3: Apply User-Level Filter
-
-After blending, add a filter to the entire dashboard:
-
-**Filter Configuration:**
-- Field: `ACL Expanded.Email`
-- Operator: `Equals`
-- Value: `VIEWER_EMAIL()` ← Built-in Looker Studio function
-
-**What this does:**
-- `VIEWER_EMAIL()` returns the email address of the current dashboard viewer
-- Filter restricts blended data to only rows where ACL Expanded.Email matches the viewer
-- Each user automatically sees only their permitted data
+**Visual representation:**
+```
+Operational Data (Left)     ACL Expanded (Right - filtered by viewer email)
+├─ Region: Ops Central      ├─ Email: user@example.com (only this user's rows)
+├─ Site: Pollok            ├─ Region: Ops Central
+├─ Department: Form 1       ├─ Site: Pollok
+├─ Metrics: [data]          └─ Department: Form 1
+└─ [Joins with ACL] ────────┘
+   Result: User sees this data row
+```
 
 #### Step 4: Test Access Control
 
@@ -348,6 +387,11 @@ After blending, add a filter to the entire dashboard:
 3. ✅ Share with a regional head - verify they see all sites in their region
 4. ✅ Check edge cases (new users, users without ACL entries)
 5. ✅ Verify cross-region users don't see other regions' data
+
+**Important Testing Note:**
+- The email filter on ACL data source happens automatically based on viewer
+- You don't need to manually apply filters in the report
+- Each viewer sees different results based on their ACL permissions
 
 ### Field Mapping Best Practices
 
@@ -379,32 +423,47 @@ Data blending combines multiple data sources into a single dataset. For access c
 
 ### Join Types and Their Impact
 
-#### Inner Join (RECOMMENDED)
-**Behavior**: Only returns records that exist in BOTH data sources
-**Use Case**: Strict access control
-**Result**: Users see nothing if they lack permission
+#### Left Join (RECOMMENDED for this ACL approach)
+**Behavior**: Returns all records from operational data (left), joined with matching ACL records (right)
+**Use Case**: When ACL is pre-filtered by email at data source level
+**Result**: Users see operational data they have permission for
+
+**How it works:**
+1. ACL data source is filtered to current viewer's email BEFORE the blend
+2. Left join starts with all operational data
+3. Only rows that match viewer's ACL records are kept
+4. Effect is the same as inner join, but more efficient
 
 **Example:**
 ```
-Main Data (3 records):
-- Ops Central, Pollok, Form 1
-- Ops East, TouchBase Fife, Form 2
-- Ops West, Fort William, Form 3
+Operational Data (Left - 3 records):
+- Ops Central, Pollok, Form 1 → Sales: 100
+- Ops East, TouchBase Fife, Form 2 → Sales: 200
+- Ops West, Fort William, Form 3 → Sales: 300
 
-ACL Expanded for user@example.com (2 records):
-- Ops Central, Pollok, Form 1
-- Ops East, TouchBase Fife, Form 2
+ACL for current viewer user@example.com (Right - already filtered, 2 records):
+- user@example.com, Ops Central, Pollok, Form 1
+- user@example.com, Ops East, TouchBase Fife, Form 2
 
-Blended Result (2 records):
-- Ops Central, Pollok, Form 1 ✓
-- Ops East, TouchBase Fife, Form 2 ✓
-(Fort William record excluded - no permission)
+Blended Result (2 records - only matching):
+- Ops Central, Pollok, Form 1 → Sales: 100 ✓
+- Ops East, TouchBase Fife, Form 2 → Sales: 200 ✓
+(Fort William record excluded - no ACL permission)
 ```
 
-#### Left Join (NOT RECOMMENDED for Access Control)
-**Behavior**: Returns ALL records from main data, even without permission match
-**Risk**: Users could see data they shouldn't
-**When to use**: Only for troubleshooting to see what data exists without permission
+**Why Left Join (not Inner Join) with Email-Filtered ACL:**
+- ACL table is already filtered to current user (only their permissions loaded)
+- Starting from operational data (left) and filtering by user's ACL (right)
+- More efficient than loading all ACL records and filtering later
+- Follows Google's recommended pattern for row-level security
+
+#### Inner Join (Alternative approach, but less efficient)
+**Behavior**: Only returns records that exist in BOTH data sources
+**Use Case**: When NOT using email filter at data source level
+**Problem**: Loads entire ACL table (all users), then filters in report
+**Result**: Same outcome but slower performance
+
+**When to use:** Only if you cannot apply email filter at data source level
 
 ### Cardinality Considerations
 
@@ -453,22 +512,29 @@ Dashboard shows: 15 total incidents (5×3) ← WRONG!
 
 **Optimization Strategies:**
 
-1. **Filter ACL in Data Source**
-   - In Looker Studio Data Source settings, add filter: `Email = VIEWER_EMAIL()`
-   - Reduces ACL records loaded per user to only their permissions
-   - **Caution**: May not work for all data source types
+1. **Apply Email Filter at Data Source Level (MOST IMPORTANT)**
+   - In ACL Expanded data source settings, enable "Filter by email"
+   - This filters ACL records BEFORE blending
+   - Instead of loading 10,000 ACL records, only loads 10-100 for current user
+   - **Massive performance improvement** - this is the key optimization
 
-2. **Use BigQuery Instead of Sheets**
+2. **Use Left Join (as recommended by Google)**
+   - More efficient when ACL is pre-filtered by email
+   - Reduces join complexity
+
+3. **Use BigQuery Instead of Sheets (for very large organizations)**
    - Export ACL Expanded to BigQuery table
    - BigQuery handles large datasets more efficiently
    - Enables SQL-based filtering before Looker Studio
+   - Consider when ACL has 50,000+ records or 500+ users
 
-3. **Create Regional ACL Sheets**
+4. **Create Regional ACL Sheets (if needed)**
    - Split ACL Expanded into regional sheets
    - Dashboards connect to relevant regional ACL only
    - Reduces join complexity
+   - Only needed for extremely large organizations
 
-4. **Schedule Regular Expansions**
+5. **Schedule Regular Expansions**
    - Run expansion script on schedule (daily/weekly)
    - Don't expand on every dashboard load
    - Balance freshness vs performance
@@ -874,11 +940,15 @@ Notes: [Any observations]
    - Check: ACL email matches Looker Studio login email exactly
    - Common issue: firstname.lastname vs firstnamelastname
    - Solution: Update email in ACL to match Google account
-3. **Blend not configured**
+3. **Email filter not applied to ACL data source**
+   - Check: ACL data source has "Filter by email" enabled
+   - This is the MOST COMMON issue
+   - Solution: Edit ACL data source, enable email filtering on Email field
+4. **Blend not configured**
    - Check: Data blend includes ACL Expanded
-   - Check: VIEWER_EMAIL() filter applied
+   - Check: Left join configured with proper join keys
    - Solution: Recreate data blend following documentation
-4. **No matching records after join**
+5. **No matching records after join**
    - Check: Join keys match between data sources
    - Check: Region/Site/Department names match exactly
    - Solution: Standardize naming conventions
@@ -890,19 +960,20 @@ Notes: [Any observations]
 - User sees other regions' data
 
 **Causes & Solutions:**
-1. **Multiple ACL entries**
+1. **Email filter not applied to ACL data source**
+   - **Most likely cause** - ACL shows all users' permissions
+   - Check: ACL data source settings
+   - Solution: Enable "Filter by email" on ACL data source Email field
+2. **Multiple ACL entries**
    - Check: Search for duplicate email entries in ACL
    - User gets union of all permissions
-   - Solution: Remove unintended duplicate entries
-2. **Filter = "Own Region" instead of "Own Areas"**
+   - Solution: Remove unintended duplicate entries (or keep if intentional)
+3. **Filter = "Own Region" instead of "Own Areas"**
    - User may have been incorrectly assigned broader access
    - Solution: Change filter to "Own Areas", specify local sites
-3. **VIEWER_EMAIL() filter not applied**
-   - Check: Dashboard-level filter exists
-   - Solution: Add filter Email = VIEWER_EMAIL()
-4. **Left Join instead of Inner Join**
-   - Check: Blend configuration
-   - Solution: Change to Inner Join
+4. **Wrong join type (Full Outer Join)**
+   - Check: Blend configuration should be Left Join
+   - Solution: Change to Left Join with ACL on right side
 
 #### Issue 3: Duplicate Records in Dashboard
 
@@ -1142,4 +1213,4 @@ By following this documentation and best practices, administrators can confident
 **Last Updated**: October 2025  
 **Next Review Date**: January 2026  
 **Owner**: ICT / Data Governance Team  
-**Approver**: Director of Finance / GDPR Officer
+**Approver**: None
